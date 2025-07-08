@@ -1,6 +1,29 @@
 import SwiftUI
 
 struct ContentView: View {
+    @State private var selectedTab = 0
+    
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            // Tab 1: Filings Downloader
+            FilingsDownloaderView()
+                .tabItem {
+                    Label("Download Filings", systemImage: "arrow.down.doc")
+                }
+                .tag(0)
+            
+            // Tab 2: Intelligence Package
+            IntelligencePackageView()
+                .tabItem {
+                    Label("AI Package", systemImage: "brain")
+                }
+                .tag(1)
+        }
+        .frame(minWidth: 700, idealWidth: 800, minHeight: 750, idealHeight: 850)
+    }
+}
+
+struct FilingsDownloaderView: View {
     @StateObject private var viewModel = DownloaderViewModel()
     
     var body: some View {
@@ -128,7 +151,7 @@ struct ContentView: View {
                         SectionCard(title: "Last Download", icon: "checkmark.circle") {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Successfully downloaded \(result.successful) of \(result.total) filings")
-                                    .font(.system(.body, design: .monospaced))
+                                    .font(.system(.body, design: .default))
                                 
                                 if result.successful > 0 {
                                     Button("Open Download Folder") {
@@ -150,7 +173,6 @@ struct ContentView: View {
             // Footer with Download Button
             FooterView(viewModel: viewModel)
         }
-        .frame(minWidth: 600, minHeight: 700)
         .sheet(isPresented: $viewModel.showingFilingTypeSelector) {
             FilingTypeSelectorView(
                 selectedTypes: $viewModel.selectedFilingTypes,

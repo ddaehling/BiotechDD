@@ -27,7 +27,7 @@ struct RecentFilings: Codable {
     let reportDate: [String]?
 }
 
-struct Filing: Identifiable {
+struct Filing: Identifiable, Codable {
     let id = UUID()
     let form: String
     let filingDate: String
@@ -38,6 +38,14 @@ struct Filing: Identifiable {
     var downloadURL: String {
         // This will be constructed when downloading
         return ""
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case form
+        case filingDate
+        case accessionNumber
+        case primaryDocument
+        case reportDate
     }
 }
 
@@ -54,8 +62,22 @@ struct FilingType: Identifiable, Equatable {
         FilingType(name: "DEF 14A"),
         FilingType(name: "20-F"),
         FilingType(name: "S-1"),
+        FilingType(name: "S-3"),
         FilingType(name: "424B"),
-        FilingType(name: "SC 13G")
+        FilingType(name: "424B2"),
+        FilingType(name: "424B3"),
+        FilingType(name: "424B4"),
+        FilingType(name: "424B5"),
+        FilingType(name: "SC 13G"),
+        FilingType(name: "SC 13G/A"),
+        FilingType(name: "SC 13D"),
+        FilingType(name: "SC 13D/A"),
+        FilingType(name: "3"),
+        FilingType(name: "4"),
+        FilingType(name: "5"),
+        FilingType(name: "425"),
+        FilingType(name: "S-4"),
+        FilingType(name: "DEFM14A")
     ]
 }
 
