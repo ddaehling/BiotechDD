@@ -142,7 +142,7 @@ class FINRAClient {
                     shortInterest: shortVolume,
                     shortInterestRatio: shortPercent / 100,
                     percentOfFloat: 0, // Would need additional data
-                    daysTocover: 0, // Would need average volume
+                    daysToCover: 0, // Would need average volume
                     previousShortInterest: 0, // Would need historical data
                     changePercent: 0,
                     recordDate: recordDate,
