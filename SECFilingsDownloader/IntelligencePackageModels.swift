@@ -48,11 +48,23 @@ struct ShortInterestData: Codable {
     let shortInterest: Int
     let shortInterestRatio: Double
     let percentOfFloat: Double
-    let daysTocover: Double
+    let daysToCover: Double
     let previousShortInterest: Int
     let changePercent: Double
     let recordDate: Date
     let settlementDate: Date
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case shortInterest
+        case shortInterestRatio
+        case percentOfFloat
+        case daysToCover = "daysTocover"
+        case previousShortInterest
+        case changePercent
+        case recordDate
+        case settlementDate
+    }
 }
 
 struct DataSources: Codable {
