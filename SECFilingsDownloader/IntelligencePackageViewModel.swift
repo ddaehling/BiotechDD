@@ -366,7 +366,7 @@ class IntelligencePackageViewModel: ObservableObject {
     }
     
     private func downloadSingleFiling(_ filing: Filing, to directory: URL, cik: String, ticker: String) async -> Bool {
-        // Skip downloading if it's a text-only filing
+        // Skip if the primary document isn’t HTML or text
         guard filing.primaryDocument.hasSuffix(".htm") ||
               filing.primaryDocument.hasSuffix(".html") ||
               filing.primaryDocument.hasSuffix(".txt") else {
