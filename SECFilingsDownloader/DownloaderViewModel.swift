@@ -12,6 +12,7 @@ class DownloaderViewModel: ObservableObject {
     @Published var downloadFolder: URL?
     @Published var convertToPDF = true
     @Published var keepOriginalHTML = false
+    @Published var mergeHTMLFiles = false
     
     // UI State
     @Published var isDownloading = false
@@ -25,6 +26,7 @@ class DownloaderViewModel: ObservableObject {
     @Published var lastDownloadResult: (successful: Int, total: Int)?
     
     private let apiClient = SECAPIClient.shared
+    private var updateTask: Task<Void, Never>?
     
     init() {
         // Set default download folder to Downloads
@@ -86,8 +88,18 @@ class DownloaderViewModel: ObservableObject {
                 outputDirectory: downloadFolder!,
                 convertToPDF: convertToPDF,
                 keepOriginalHTML: keepOriginalHTML,
-                progressHandler: { progress, message in
-                    Task { @MainActor in
+                mergeHTMLFiles: mergeHTMLFiles,
+                progressHandler: { [weak self] progress, message in
+                    guard let self = self else { return }
+                    
+                    // Cancel any pending update
+                    self.updateTask?.cancel()
+                    
+                    // Batch updates to prevent rapid fire changes
+                    self.updateTask = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
+                        guard !Task.isCancelled else { return }
+                        
                         self.downloadProgress = progress
                         self.statusMessage = message
                     }
@@ -124,5 +136,6 @@ class DownloaderViewModel: ObservableObject {
         lastDownloadResult = nil
         convertToPDF = true
         keepOriginalHTML = false
+        mergeHTMLFiles = false
     }
 }

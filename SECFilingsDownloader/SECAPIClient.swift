@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os.log
 
 class SECAPIClient: ObservableObject {
     static let shared = SECAPIClient()
@@ -25,6 +26,19 @@ class SECAPIClient: ObservableObject {
             "Accept-Encoding": "gzip, deflate",
             "Accept": "application/json, text/plain, */*"
         ]
+        
+        // Increase timeouts to prevent network warnings
+        config.timeoutIntervalForRequest = 60  // Increased from default
+        config.timeoutIntervalForResource = 300 // 5 minutes for large downloads
+        
+        // Configure TCP settings to reduce connection issues
+        config.waitsForConnectivity = true
+        config.allowsConstrainedNetworkAccess = true
+        config.allowsExpensiveNetworkAccess = true
+        
+        // Set service type for better performance
+        config.networkServiceType = .responsiveData
+        
         self.session = URLSession(configuration: config)
     }
     
@@ -44,7 +58,10 @@ class SECAPIClient: ObservableObject {
         await enforceRateLimit()
         
         let url = URL(string: "\(baseURL)/files/company_tickers.json")!
-        let (data, _) = try await session.data(from: url)
+        
+        let data = try await performRequestWithRetry {
+            try await self.session.data(from: url).0
+        }
         
         let tickers = try decoder.decode([String: CompanyTicker].self, from: data)
         
@@ -63,7 +80,10 @@ class SECAPIClient: ObservableObject {
         let paddedCIK = String(format: "%010d", Int(cik) ?? 0)
         let url = URL(string: "\(dataURL)/submissions/CIK\(paddedCIK).json")!
         
-        let (data, _) = try await session.data(from: url)
+        let data = try await performRequestWithRetry {
+            try await self.session.data(from: url).0
+        }
+        
         return try decoder.decode(Submissions.self, from: data)
     }
     
@@ -119,7 +139,21 @@ class SECAPIClient: ObservableObject {
     func downloadFiling(from url: URL, to localURL: URL) async throws {
         await enforceRateLimit()
         
-        let (data, _) = try await session.data(from: url)
+        let data = try await performRequestWithRetry {
+            let (data, response) = try await self.session.data(from: url)
+            
+            // Verify we got a good response
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode != 200 {
+                throw NSError(
+                    domain: "SECAPIClient",
+                    code: httpResponse.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode) error"]
+                )
+            }
+            
+            return data
+        }
         
         // Create directory if needed
         let directory = localURL.deletingLastPathComponent()
@@ -131,11 +165,51 @@ class SECAPIClient: ObservableObject {
     
     // MARK: - Helper Methods
     
-    private func sanitizeFilename(_ filename: String) -> String {
+    func sanitizeFilename(_ filename: String) -> String {
         // Replace invalid filename characters
         let invalidCharacters = CharacterSet(charactersIn: ":/\\?%*|\"<>")
         let components = filename.components(separatedBy: invalidCharacters)
         return components.joined(separator: "-")
+    }
+    
+    private func performRequestWithRetry<T>(
+        operation: () async throws -> T,
+        maxRetries: Int = 3
+    ) async throws -> T {
+        var lastError: Error?
+        
+        for attempt in 0..<maxRetries {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                
+                if #available(macOS 11.0, *) {
+                    Logger.network.warning("Request attempt \(attempt + 1) failed: \(error.localizedDescription)")
+                }
+                
+                // If it's a network timeout, wait before retrying
+                let nsError = error as NSError
+                if nsError.domain == NSURLErrorDomain &&
+                   (nsError.code == NSURLErrorTimedOut ||
+                    nsError.code == NSURLErrorNetworkConnectionLost) &&
+                   attempt < maxRetries - 1 {
+                    
+                    let delay = Double(attempt + 1) * 2.0 // Exponential backoff
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    continue
+                }
+                
+                // For other errors, fail immediately
+                throw error
+            }
+        }
+        
+        throw lastError ?? NSError(
+            domain: "SECAPIClient",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Failed after \(maxRetries) attempts"]
+        )
     }
     
     // MARK: - Main Download Method
@@ -147,6 +221,7 @@ class SECAPIClient: ObservableObject {
                         outputDirectory: URL,
                         convertToPDF: Bool = false,
                         keepOriginalHTML: Bool = false,
+                        mergeHTMLFiles: Bool = false,
                         progressHandler: @escaping (Double, String) -> Void) async throws -> (successful: Int, total: Int) {
         
         // Get CIK
@@ -187,7 +262,7 @@ class SECAPIClient: ObservableObject {
         var successful = 0
         
         for (index, filing) in filings.enumerated() {
-            let progress = 0.2 + (0.8 * Double(index) / Double(filings.count))
+            let progress = 0.2 + (0.7 * Double(index) / Double(filings.count))
             progressHandler(progress, "Downloading \(filing.form) from \(filing.filingDate)...")
             
             // Create form type directory
@@ -220,8 +295,9 @@ class SECAPIClient: ObservableObject {
             do {
                 try await downloadFiling(from: url, to: localURL)
                 
-                // Convert to PDF if requested
-                if convertToPDF && (filing.primaryDocument.hasSuffix(".htm") || filing.primaryDocument.hasSuffix(".html")) {
+                // Convert to PDF if requested and not merging
+                // (If merging, we'll convert after merging)
+                if convertToPDF && !mergeHTMLFiles && (filing.primaryDocument.hasSuffix(".htm") || filing.primaryDocument.hasSuffix(".html")) {
                     progressHandler(progress, "Converting \(filing.form) to PDF...")
                     
                     // Use same beautified filename but with .pdf extension
@@ -238,11 +314,53 @@ class SECAPIClient: ObservableObject {
                     }
                 }
                 
-                // Note: JSON metadata files are no longer created per user request
-                
                 successful += 1
             } catch {
-                print("Failed to download \(filing.form): \(error)")
+                if #available(macOS 11.0, *) {
+                    Logger.network.error("Failed to download \(filing.form): \(error.localizedDescription)")
+                }
+            }
+        }
+        
+        // Merge HTML files if requested
+        if mergeHTMLFiles && successful > 0 {
+            progressHandler(0.95, "Merging HTML files by type...")
+            
+            do {
+                try await mergeHTMLFilesByType(
+                    in: companyDir,
+                    ticker: ticker.uppercased(),
+                    formTypes: formTypes,
+                    filings: filings
+                )
+                
+                // If merging was successful and we're converting to PDF,
+                // convert the merged files too
+                if convertToPDF {
+                    progressHandler(0.98, "Converting merged files to PDF...")
+                    
+                    for formType in formTypes {
+                        let cleanFormType = sanitizeFilename(formType.replacingOccurrences(of: " ", with: "_"))
+                        let formDir = companyDir.appendingPathComponent(cleanFormType)
+                        
+                        // Find merged HTML file
+                        if let mergedFile = try? FileManager.default.contentsOfDirectory(at: formDir, includingPropertiesForKeys: nil)
+                            .first(where: { $0.lastPathComponent.contains("MERGED") && ($0.pathExtension == "htm" || $0.pathExtension == "html") }) {
+                            
+                            let pdfURL = mergedFile.deletingPathExtension().appendingPathExtension("pdf")
+                            let conversionSuccess = await convertHTMLToPDF(from: mergedFile, to: pdfURL)
+                            
+                            if conversionSuccess && !keepOriginalHTML {
+                                try? FileManager.default.removeItem(at: mergedFile)
+                            }
+                        }
+                    }
+                }
+            } catch {
+                if #available(macOS 11.0, *) {
+                    Logger.merge.error("Failed to merge HTML files: \(error.localizedDescription)")
+                }
+                // Continue without failing the entire operation
             }
         }
         

@@ -2,6 +2,11 @@ import Foundation
 
 class FINRAClient {
     private let session: URLSession
+    private let tokenEndpoint = "https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token?grant_type=client_credentials"
+    private let apiBaseURL = "https://api.finra.org"
+    
+    private var accessToken: String?
+    private var tokenExpirationDate: Date?
     
     init() {
         let config = URLSessionConfiguration.default
@@ -9,29 +14,81 @@ class FINRAClient {
         self.session = URLSession(configuration: config)
     }
     
-    // MARK: - Fetch Short Interest Data
+    // MARK: - Authentication
     
-    func fetchShortInterest(for symbol: String) async throws -> ShortInterestData? {
-        // FINRA publishes data twice monthly
-        // Files are available at: http://regsho.finra.org/
-        // Format: CNMSshvol[YYYYMMDD].txt
+    private func getAccessToken(clientID: String, clientSecret: String) async throws -> String {
+        // Check if we have a valid cached token
+        if let token = accessToken,
+           let expiration = tokenExpirationDate,
+           expiration > Date() {
+            return token
+        }
         
-        print("Fetching short interest for \(symbol)")
+        // Create Basic Auth token
+        let credentials = "\(clientID):\(clientSecret)"
+        guard let credentialsData = credentials.data(using: .utf8) else {
+            throw FINRAError.invalidCredentials
+        }
+        let base64Credentials = credentialsData.base64EncodedString()
         
-        // Get the most recent file dates (typically 15th and last day of month)
-        let recentDates = getRecentFINRADates()
-        print("Checking FINRA dates: \(recentDates)")
+        // Create request
+        guard let url = URL(string: tokenEndpoint) else {
+            throw FINRAError.invalidURL
+        }
         
-        for dateString in recentDates {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Basic \(base64Credentials)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        
+        // Make request
+        let (data, response) = try await session.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            throw FINRAError.authenticationFailed
+        }
+        
+        // Parse response
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["access_token"] as? String,
+              let expiresIn = json["expires_in"] as? Int else {
+            throw FINRAError.invalidResponse
+        }
+        
+        // Cache token
+        self.accessToken = token
+        self.tokenExpirationDate = Date().addingTimeInterval(TimeInterval(expiresIn - 60)) // Refresh 1 minute early
+        
+        return token
+    }
+    
+    // MARK: - Fetch Consolidated Short Interest Data
+    
+    func fetchShortInterest(for symbol: String, clientID: String, clientSecret: String) async throws -> ShortInterestData? {
+        print("Fetching short interest for \(symbol) using FINRA API")
+        
+        // Get access token
+        let token = try await getAccessToken(clientID: clientID, clientSecret: clientSecret)
+        
+        // Try production endpoint first, then mock endpoint for testing
+        let endpoints = [
+            "\(apiBaseURL)/data/group/otcmarket/name/consolidatedShortInterest",
+            "\(apiBaseURL)/data/group/otcmarket/name/consolidatedShortInterestMock"
+        ]
+        
+        for endpoint in endpoints {
             do {
-                let data = try await fetchFINRAFile(date: dateString)
-                if let shortData = parseShortInterest(from: data, symbol: symbol, date: dateString) {
-                    print("Found short interest data for \(symbol) on \(dateString)")
-                    return shortData
+                if let data = try await fetchShortInterestFromEndpoint(
+                    endpoint: endpoint,
+                    symbol: symbol,
+                    token: token
+                ) {
+                    return data
                 }
             } catch {
-                print("Failed to fetch FINRA file for \(dateString): \(error)")
-                // Continue to next date
+                print("Failed to fetch from \(endpoint): \(error)")
+                continue
             }
         }
         
@@ -39,7 +96,163 @@ class FINRAClient {
         return nil
     }
     
-    // MARK: - Helper Methods
+    private func fetchShortInterestFromEndpoint(
+        endpoint: String,
+        symbol: String,
+        token: String
+    ) async throws -> ShortInterestData? {
+        // Construct URL with query parameters
+        var components = URLComponents(string: endpoint)
+        components?.queryItems = [
+            URLQueryItem(name: "symbol", value: symbol),
+            URLQueryItem(name: "limit", value: "1") // Get most recent record
+        ]
+        
+        guard let url = components?.url else {
+            throw FINRAError.invalidURL
+        }
+        
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        
+        let (data, response) = try await session.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw FINRAError.invalidResponse
+        }
+        
+        if httpResponse.statusCode == 404 {
+            // No data found for this symbol
+            return nil
+        }
+        
+        guard httpResponse.statusCode == 200 else {
+            throw FINRAError.apiError("HTTP \(httpResponse.statusCode)")
+        }
+        
+        // Parse the response
+        return try parseConsolidatedShortInterest(from: data, symbol: symbol)
+    }
+    
+    private func parseConsolidatedShortInterest(from data: Data, symbol: String) throws -> ShortInterestData? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FINRAError.invalidData
+        }
+        
+        // The API might return data in a "data" or "records" field
+        let records: [[String: Any]]
+        if let dataArray = json["data"] as? [[String: Any]] {
+            records = dataArray
+        } else if let recordsArray = json["records"] as? [[String: Any]] {
+            records = recordsArray
+        } else if let singleRecord = json as? [String: Any], singleRecord["symbol"] != nil {
+            records = [singleRecord]
+        } else {
+            return nil
+        }
+        
+        // Find the record for our symbol
+        guard let record = records.first(where: {
+            ($0["symbol"] as? String)?.uppercased() == symbol.uppercased()
+        }) else {
+            return nil
+        }
+        
+        // Parse the record
+        return parseShortInterestRecord(record)
+    }
+    
+    private func parseShortInterestRecord(_ record: [String: Any]) -> ShortInterestData? {
+        guard let symbol = record["symbol"] as? String else { return nil }
+        
+        // Parse dates
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        
+        let recordDate: Date
+        if let dateString = record["recordDate"] as? String,
+           let date = dateFormatter.date(from: dateString) {
+            recordDate = date
+        } else {
+            recordDate = Date()
+        }
+        
+        let settlementDate: Date
+        if let dateString = record["settlementDate"] as? String,
+           let date = dateFormatter.date(from: dateString) {
+            settlementDate = date
+        } else {
+            // Default to T+2 from record date
+            settlementDate = Calendar.current.date(byAdding: .day, value: 2, to: recordDate) ?? recordDate
+        }
+        
+        // Parse numeric values with flexible type handling
+        let shortInterest = parseNumericValue(record["shortInterest"] ?? record["shortShareQuantity"]) ?? 0
+        let shortInterestRatio = parseDoubleValue(record["shortInterestRatio"]) ?? 0
+        let percentOfFloat = parseDoubleValue(record["percentOfFloat"]) ?? 0
+        let daysToCover = parseDoubleValue(record["daysToCover"]) ?? 0
+        let previousShortInterest = parseNumericValue(record["previousShortInterest"]) ?? 0
+        let changePercent = parseDoubleValue(record["changePercent"]) ?? 0
+        
+        return ShortInterestData(
+            symbol: symbol,
+            shortInterest: shortInterest,
+            shortInterestRatio: shortInterestRatio,
+            percentOfFloat: percentOfFloat,
+            daysTocover: daysToCover,
+            previousShortInterest: previousShortInterest,
+            changePercent: changePercent,
+            recordDate: recordDate,
+            settlementDate: settlementDate
+        )
+    }
+    
+    private func parseNumericValue(_ value: Any?) -> Int? {
+        if let intValue = value as? Int {
+            return intValue
+        } else if let doubleValue = value as? Double {
+            return Int(doubleValue)
+        } else if let stringValue = value as? String {
+            return Int(stringValue.replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+    
+    private func parseDoubleValue(_ value: Any?) -> Double? {
+        if let doubleValue = value as? Double {
+            return doubleValue
+        } else if let intValue = value as? Int {
+            return Double(intValue)
+        } else if let stringValue = value as? String {
+            return Double(stringValue.replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+    
+    // MARK: - Alternative: Try legacy file-based approach as fallback
+    
+    func fetchShortInterestLegacy(for symbol: String) async throws -> ShortInterestData? {
+        print("Trying legacy FINRA file approach for \(symbol)")
+        
+        // Get the most recent file dates (typically 15th and last day of month)
+        let recentDates = getRecentFINRADates()
+        
+        for dateString in recentDates {
+            do {
+                let data = try await fetchFINRAFile(date: dateString)
+                if let shortData = parseShortInterestLegacy(from: data, symbol: symbol, date: dateString) {
+                    print("Found short interest data for \(symbol) on \(dateString)")
+                    return shortData
+                }
+            } catch {
+                // Continue to next date
+                continue
+            }
+        }
+        
+        return nil
+    }
     
     private func getRecentFINRADates() -> [String] {
         var dates: [String] = []
@@ -50,15 +263,15 @@ class FINRAClient {
         let today = Date()
         
         // FINRA publishes data twice monthly, typically around the 15th and end of month
-        // Data is delayed by about 2 weeks, so we look at past dates
-        for monthOffset in 0..<3 {  // Check last 3 months
+        // Data is delayed by about 2 weeks
+        for monthOffset in 0..<3 {
             guard let monthDate = calendar.date(byAdding: .month, value: -monthOffset, to: today) else { continue }
             
             // Mid-month (15th)
             var components = calendar.dateComponents([.year, .month], from: monthDate)
             components.day = 15
             if let midMonth = calendar.date(from: components),
-               midMonth < today {  // Only past dates
+               midMonth < today {
                 dates.append(formatter.string(from: midMonth))
             }
             
@@ -67,38 +280,19 @@ class FINRAClient {
             if let firstOfMonth = calendar.date(from: components),
                let firstOfNextMonth = calendar.date(byAdding: .month, value: 1, to: firstOfMonth),
                let lastOfMonth = calendar.date(byAdding: .day, value: -1, to: firstOfNextMonth),
-               lastOfMonth < today {  // Only past dates
+               lastOfMonth < today {
                 dates.append(formatter.string(from: lastOfMonth))
             }
         }
         
-        // Sort dates in descending order (most recent first)
         dates.sort(by: >)
-        
         return dates
     }
     
     private func fetchFINRAFile(date: String) async throws -> String {
-        // Try HTTPS first, fall back to HTTP if needed
-        let httpsURLString = "https://regsho.finra.org/CNMSshvol\(date).txt"
-        let httpURLString = "http://regsho.finra.org/CNMSshvol\(date).txt"
+        let urlString = "https://regsho.finra.org/CNMSshvol\(date).txt"
         
-        // Try HTTPS first
-        if let url = URL(string: httpsURLString) {
-            do {
-                let (data, response) = try await session.data(from: url)
-                if let httpResponse = response as? HTTPURLResponse,
-                   httpResponse.statusCode == 200,
-                   let content = String(data: data, encoding: .utf8) {
-                    return content
-                }
-            } catch {
-                print("HTTPS request failed, trying HTTP: \(error.localizedDescription)")
-            }
-        }
-        
-        // Fall back to HTTP
-        guard let url = URL(string: httpURLString) else {
+        guard let url = URL(string: urlString) else {
             throw FINRAError.invalidURL
         }
         
@@ -116,34 +310,31 @@ class FINRAClient {
         return content
     }
     
-    private func parseShortInterest(from content: String, symbol: String, date: String) -> ShortInterestData? {
+    private func parseShortInterestLegacy(from content: String, symbol: String, date: String) -> ShortInterestData? {
         let lines = content.components(separatedBy: .newlines)
         
         for line in lines {
             let fields = line.components(separatedBy: "|")
             
-            // FINRA format: Date|Symbol|ShortVolume|TotalVolume|Market
             if fields.count >= 4 && fields[1] == symbol {
                 guard let shortVolume = Int(fields[2]),
                       let totalVolume = Int(fields[3]) else { continue }
                 
                 let shortPercent = Double(shortVolume) / Double(totalVolume) * 100
                 
-                // Create date from string
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyyMMdd"
                 let recordDate = formatter.date(from: date) ?? Date()
                 
-                // Settlement date is typically T+2
                 let settlementDate = Calendar.current.date(byAdding: .day, value: 2, to: recordDate) ?? recordDate
                 
                 return ShortInterestData(
                     symbol: symbol,
                     shortInterest: shortVolume,
                     shortInterestRatio: shortPercent / 100,
-                    percentOfFloat: 0, // Would need additional data
-                    daysTocover: 0, // Would need average volume
-                    previousShortInterest: 0, // Would need historical data
+                    percentOfFloat: 0,
+                    daysTocover: 0,
+                    previousShortInterest: 0,
                     changePercent: 0,
                     recordDate: recordDate,
                     settlementDate: settlementDate
@@ -153,78 +344,38 @@ class FINRAClient {
         
         return nil
     }
-    
-    // MARK: - Alternative: SEC Fails-to-Deliver Data
-    
-    func fetchFailsToDeliver(for symbol: String) async throws -> FailsToDeliverData? {
-        // SEC publishes FTD data monthly
-        // Available at: https://www.sec.gov/data/foiadocsfailsdatahtm
-        
-        let currentDate = Date()
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMM"
-        
-        // Try current and previous month
-        for monthOffset in 0..<2 {
-            guard let monthDate = Calendar.current.date(byAdding: .month, value: -monthOffset, to: currentDate) else { continue }
-            let monthString = formatter.string(from: monthDate)
-            
-            if let data = try? await fetchSECFailsData(yearMonth: monthString) {
-                if let ftdData = parseFailsToDeliver(from: data, symbol: symbol) {
-                    return ftdData
-                }
-            }
-        }
-        
-        return nil
-    }
-    
-    private func fetchSECFailsData(yearMonth: String) async throws -> String {
-        // SEC FTD files are in a specific format
-        // This is a simplified implementation
-        let urlString = "https://www.sec.gov/files/data/fails-deliver-data/cnsfails\(yearMonth).zip"
-        
-        // Would need to download, unzip, and parse
-        // For now, returning empty string as placeholder
-        return ""
-    }
-    
-    private func parseFailsToDeliver(from content: String, symbol: String) -> FailsToDeliverData? {
-        // Parse SEC FTD format
-        // Format: Settlement Date|CUSIP|Symbol|Quantity|Description|Price
-        
-        // Simplified implementation
-        return nil
-    }
 }
 
 // MARK: - Error Types
 
 enum FINRAError: LocalizedError {
     case invalidURL
+    case invalidCredentials
+    case authenticationFailed
     case fileNotFound
     case invalidData
     case symbolNotFound
+    case apiError(String)
+    case invalidResponse
     
     var errorDescription: String? {
         switch self {
         case .invalidURL:
-            return "Invalid FINRA data URL"
+            return "Invalid FINRA API URL"
+        case .invalidCredentials:
+            return "Invalid FINRA API credentials"
+        case .authenticationFailed:
+            return "Failed to authenticate with FINRA API"
         case .fileNotFound:
-            return "FINRA data file not found for this date"
+            return "FINRA data file not found"
         case .invalidData:
             return "Unable to parse FINRA data"
         case .symbolNotFound:
             return "Symbol not found in FINRA data"
+        case .apiError(let message):
+            return "FINRA API Error: \(message)"
+        case .invalidResponse:
+            return "Invalid response from FINRA API"
         }
     }
-}
-
-// MARK: - Data Models
-
-struct FailsToDeliverData: Codable {
-    let symbol: String
-    let settlementDate: Date
-    let failedShares: Int
-    let price: Double?
 }

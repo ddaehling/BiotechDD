@@ -8,6 +8,8 @@ class IntelligencePackageViewModel: ObservableObject {
     // Input fields
     @Published var ticker = ""
     @Published var alphaVantageAPIKey = ""
+    @Published var finraClientID = ""
+    @Published var finraClientSecret = ""
     @Published var includeMarketData = true
     @Published var includeShortInterest = true
     @Published var packageLocation: URL?
@@ -32,6 +34,14 @@ class IntelligencePackageViewModel: ObservableObject {
             self.alphaVantageClient = AlphaVantageClient(apiKey: savedKey)
         }
         
+        // Load saved FINRA credentials if available
+        if let savedClientID = UserDefaults.standard.string(forKey: "FINRAClientID") {
+            self.finraClientID = savedClientID
+        }
+        if let savedSecret = UserDefaults.standard.string(forKey: "FINRAClientSecret") {
+            self.finraClientSecret = savedSecret
+        }
+        
         // Set default package location
         self.packageLocation = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
     }
@@ -40,12 +50,18 @@ class IntelligencePackageViewModel: ObservableObject {
         !ticker.isEmpty &&
         packageLocation != nil &&
         !isGenerating &&
-        (!includeMarketData || !alphaVantageAPIKey.isEmpty)
+        (!includeMarketData || !alphaVantageAPIKey.isEmpty) &&
+        (!includeShortInterest || (!finraClientID.isEmpty && !finraClientSecret.isEmpty))
     }
     
     func saveAPIKey() {
         UserDefaults.standard.set(alphaVantageAPIKey, forKey: "AlphaVantageAPIKey")
         alphaVantageClient = AlphaVantageClient(apiKey: alphaVantageAPIKey)
+    }
+    
+    func saveFINRACredentials() {
+        UserDefaults.standard.set(finraClientID, forKey: "FINRAClientID")
+        UserDefaults.standard.set(finraClientSecret, forKey: "FINRAClientSecret")
     }
     
     func selectPackageLocation() {
@@ -183,9 +199,20 @@ class IntelligencePackageViewModel: ObservableObject {
     
     private func fetchShortInterest() async throws -> ShortInterestData? {
         do {
-            return try await finraClient.fetchShortInterest(for: ticker.uppercased())
+            // First try the official API with credentials
+            if !finraClientID.isEmpty && !finraClientSecret.isEmpty {
+                return try await finraClient.fetchShortInterest(
+                    for: ticker.uppercased(),
+                    clientID: finraClientID,
+                    clientSecret: finraClientSecret
+                )
+            } else {
+                // Fall back to legacy file-based approach if no credentials
+                return try await finraClient.fetchShortInterestLegacy(for: ticker.uppercased())
+            }
         } catch {
             print("Failed to fetch short interest: \(error)")
+            // Don't throw - just return nil and continue without short interest data
             return nil
         }
     }
@@ -597,7 +624,7 @@ class IntelligencePackageViewModel: ObservableObject {
         4. Data Sources:
            - SEC EDGAR Database
            \(hasMarketData ? "- Alpha Vantage Market Data API" : "")
-           \(hasShortInterest ? "- FINRA Short Interest Reports" : "")
+           \(hasShortInterest ? "- FINRA Consolidated Short Interest API" : "")
         
         Files are organized by category in the 'filings' directory:
         - /financials - 10-K and 10-Q reports

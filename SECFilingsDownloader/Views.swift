@@ -239,3 +239,36 @@ struct DateRangePicker: View {
         }
     }
 }
+
+// MARK: - Optimized Toggle Component
+
+struct OptimizedToggle: View {
+    let title: String
+    let subtitle: String?
+    @Binding var isOn: Bool
+    let isDisabled: Bool
+    
+    init(_ title: String, subtitle: String? = nil, isOn: Binding<Bool>, disabled: Bool = false) {
+        self.title = title
+        self.subtitle = subtitle
+        self._isOn = isOn
+        self.isDisabled = disabled
+    }
+    
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(.body))
+                
+                if let subtitle = subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .disabled(isDisabled)
+        .animation(.none, value: isOn) // Prevent animation cycles
+    }
+}

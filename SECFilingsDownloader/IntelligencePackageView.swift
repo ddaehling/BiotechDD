@@ -4,6 +4,7 @@ import AppKit
 struct IntelligencePackageView: View {
     @StateObject private var viewModel = IntelligencePackageViewModel()
     @State private var showingAPIKeyInfo = false
+    @State private var showingFINRAInfo = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -90,19 +91,73 @@ struct IntelligencePackageView: View {
                             // Short Interest Toggle
                             Toggle(isOn: $viewModel.includeShortInterest) {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Include Short Interest Data")
-                                        .font(.system(.body, weight: .medium))
+                                    HStack {
+                                        Text("Include Short Interest Data")
+                                            .font(.system(.body, weight: .medium))
+                                        
+                                        Button(action: { showingFINRAInfo = true }) {
+                                            Image(systemName: "info.circle")
+                                                .foregroundColor(.accentColor)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
                                     
-                                    Text("FINRA bi-monthly reports (may not be available for all symbols)")
+                                    Text("FINRA Consolidated Short Interest reports")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                     
-                                    Text("Data is typically delayed by 2-4 weeks")
+                                    Text("Requires FINRA API credentials")
                                         .font(.caption2)
                                         .foregroundColor(.secondary)
                                 }
                             }
                             .disabled(viewModel.isGenerating)
+                            
+                            if viewModel.includeShortInterest {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("FINRA API Credentials")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    
+                                    VStack(spacing: 8) {
+                                        HStack {
+                                            Text("Client ID:")
+                                                .font(.caption)
+                                                .frame(width: 70, alignment: .trailing)
+                                            TextField("Enter Client ID", text: $viewModel.finraClientID)
+                                                .textFieldStyle(.roundedBorder)
+                                                .disabled(viewModel.isGenerating)
+                                        }
+                                        
+                                        HStack {
+                                            Text("Secret:")
+                                                .font(.caption)
+                                                .frame(width: 70, alignment: .trailing)
+                                            SecureField("Enter Client Secret", text: $viewModel.finraClientSecret)
+                                                .textFieldStyle(.roundedBorder)
+                                                .disabled(viewModel.isGenerating)
+                                        }
+                                        
+                                        HStack {
+                                            Spacer()
+                                            Button("Save Credentials") {
+                                                viewModel.saveFINRACredentials()
+                                            }
+                                            .disabled(viewModel.finraClientID.isEmpty || viewModel.finraClientSecret.isEmpty || viewModel.isGenerating)
+                                        }
+                                    }
+                                    
+                                    if viewModel.finraClientID.isEmpty || viewModel.finraClientSecret.isEmpty {
+                                        Text("Register for API access at finra.org")
+                                            .font(.caption)
+                                            .foregroundColor(.accentColor)
+                                            .onTapGesture {
+                                                NSWorkspace.shared.open(URL(string: "https://www.finra.org/finra-data/api-console")!)
+                                            }
+                                    }
+                                }
+                                .padding(.leading, 20)
+                            }
                         }
                     }
                     
@@ -207,6 +262,9 @@ struct IntelligencePackageView: View {
         }
         .sheet(isPresented: $showingAPIKeyInfo) {
             APIKeyInfoView()
+        }
+        .sheet(isPresented: $showingFINRAInfo) {
+            FINRAInfoView()
         }
     }
 }
@@ -342,6 +400,74 @@ struct APIKeyInfoView: View {
                 
                 Button("Get Free API Key") {
                     NSWorkspace.shared.open(URL(string: "https://www.alphavantage.co/support/#api-key")!)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(30)
+        .frame(width: 500)
+    }
+}
+
+struct FINRAInfoView: View {
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            HStack {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.largeTitle)
+                    .foregroundColor(.accentColor)
+                
+                Text("FINRA API Credentials")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+            }
+            
+            VStack(alignment: .leading, spacing: 12) {
+                Text("To access FINRA's Consolidated Short Interest data, you need API credentials from FINRA.")
+                
+                Text("What's included:")
+                    .font(.headline)
+                    .padding(.top)
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Consolidated short interest positions", systemImage: "chart.bar.fill")
+                    Label("Short interest ratios", systemImage: "percent")
+                    Label("Days to cover metrics", systemImage: "calendar")
+                    Label("Historical short interest trends", systemImage: "chart.line.uptrend.xyaxis")
+                }
+                .font(.callout)
+                
+                Text("How to get credentials:")
+                    .font(.headline)
+                    .padding(.top)
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("1. Visit the FINRA API Console")
+                    Text("2. Create an account or sign in")
+                    Text("3. Register a new API credential")
+                    Text("4. Copy your Client ID and Secret")
+                }
+                .font(.callout)
+                
+                Text("Note: FINRA data is typically delayed by 2 weeks")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.top)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            
+            HStack {
+                Button("Cancel") {
+                    dismiss()
+                }
+                
+                Spacer()
+                
+                Button("Open FINRA API Console") {
+                    NSWorkspace.shared.open(URL(string: "https://www.finra.org/finra-data/api-console")!)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
