@@ -2,7 +2,7 @@ import Foundation
 
 class FINRAClient {
     private let session: URLSession
-    private let tokenEndpoint = "https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token?grant_type=client_credentials"
+    private let tokenEndpoint = "https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token"
     private let apiBaseURL = "https://api.finra.org"
     
     private var accessToken: String?
@@ -11,6 +11,11 @@ class FINRAClient {
     init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
+        config.httpAdditionalHeaders = [
+            "User-Agent": "SECFilingsDownloader/1.0",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate"
+        ]
         self.session = URLSession(configuration: config)
     }
     
@@ -24,60 +29,124 @@ class FINRAClient {
             return token
         }
         
+        print("Attempting to get FINRA access token...")
+        
         // Create Basic Auth token
         let credentials = "\(clientID):\(clientSecret)"
         guard let credentialsData = credentials.data(using: .utf8) else {
             throw FINRAError.invalidCredentials
         }
         let base64Credentials = credentialsData.base64EncodedString()
+        print("Auth header will be: Basic \(String(base64Credentials.prefix(10)))...")  // Show partial for debugging
         
         // Create request
-        guard let url = URL(string: tokenEndpoint) else {
+        let urlString = "\(tokenEndpoint)?grant_type=client_credentials"
+        guard let url = URL(string: urlString) else {
             throw FINRAError.invalidURL
         }
+        
+        print("Token endpoint: \(urlString)")
         
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Basic \(base64Credentials)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        
+        // Add grant_type in the body as form data
+        let bodyString = "grant_type=client_credentials"
+        request.httpBody = bodyString.data(using: .utf8)
         
         // Make request
         let (data, response) = try await session.data(for: request)
         
-        guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200 else {
+        // Log response for debugging
+        if let httpResponse = response as? HTTPURLResponse {
+            print("FINRA Auth Response Status: \(httpResponse.statusCode)")
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("FINRA Auth Response Body: \(responseString)")
+            }
+        }
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
             throw FINRAError.authenticationFailed
         }
         
-        // Parse response
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let token = json["access_token"] as? String,
-              let expiresIn = json["expires_in"] as? Int else {
-            throw FINRAError.invalidResponse
+        // Check for various error status codes
+        if httpResponse.statusCode == 401 {
+            throw FINRAError.invalidCredentials
+        } else if httpResponse.statusCode != 200 {
+            if let errorString = String(data: data, encoding: .utf8) {
+                throw FINRAError.apiError("Authentication failed with status \(httpResponse.statusCode): \(errorString)")
+            } else {
+                throw FINRAError.apiError("Authentication failed with status \(httpResponse.statusCode)")
+            }
         }
         
-        // Cache token
-        self.accessToken = token
-        self.tokenExpirationDate = Date().addingTimeInterval(TimeInterval(expiresIn - 60)) // Refresh 1 minute early
-        
-        return token
+        // Parse response - handle both possible response formats
+        do {
+            let json = try JSONSerialization.jsonObject(with: data, options: [])
+            
+            // Try to parse as dictionary first
+            if let dict = json as? [String: Any] {
+                // Check for error message
+                if let error = dict["error"] as? String {
+                    throw FINRAError.apiError("Authentication error: \(error)")
+                }
+                
+                // Look for access token with different possible keys
+                if let token = dict["access_token"] as? String,
+                   let expiresIn = (dict["expires_in"] as? Int) ?? (dict["expires_in"] as? String).flatMap({ Int($0) }) {
+                    // Cache token
+                    self.accessToken = token
+                    self.tokenExpirationDate = Date().addingTimeInterval(TimeInterval(expiresIn - 60))
+                    print("Successfully obtained FINRA access token")
+                    
+                    // Print debug info for testing
+                    print("To test your credentials with curl:")
+                    print("curl -X POST '\(urlString)' \\")
+                    print("  -H 'Authorization: Basic \(base64Credentials)' \\")
+                    print("  -H 'Content-Type: application/x-www-form-urlencoded' \\")
+                    print("  -d 'grant_type=client_credentials'")
+                    
+                    return token
+                }
+            }
+            
+            // If we get here, we couldn't parse the expected format
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("Unexpected token response format: \(responseString)")
+            }
+            throw FINRAError.invalidResponse
+            
+        } catch {
+            print("Failed to parse token response: \(error)")
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("Raw response: \(responseString)")
+            }
+            throw FINRAError.invalidResponse
+        }
     }
     
     // MARK: - Fetch Consolidated Short Interest Data
     
     func fetchShortInterest(for symbol: String, clientID: String, clientSecret: String) async throws -> ShortInterestData? {
         print("Fetching short interest for \(symbol) using FINRA API")
+        print("Using Client ID: \(String(clientID.prefix(4)))...")  // Only show first 4 chars for security
         
         // Get access token
         let token = try await getAccessToken(clientID: clientID, clientSecret: clientSecret)
         
-        // Try production endpoint first, then mock endpoint for testing
+        // Try different endpoint variations
         let endpoints = [
             "\(apiBaseURL)/data/group/otcmarket/name/consolidatedShortInterest",
-            "\(apiBaseURL)/data/group/otcmarket/name/consolidatedShortInterestMock"
+            "\(apiBaseURL)/data/group/otcMarket/name/consolidatedShortInterest",  // Different casing
+            "\(apiBaseURL)/data/group/otcmarket/name/consolidatedShortInterestMock",
+            "\(apiBaseURL)/data/consolidatedShortInterest"  // Simplified path
         ]
         
         for endpoint in endpoints {
+            print("Trying endpoint: \(endpoint)")
             do {
                 if let data = try await fetchShortInterestFromEndpoint(
                     endpoint: endpoint,
@@ -92,7 +161,7 @@ class FINRAClient {
             }
         }
         
-        print("No short interest data found for \(symbol)")
+        print("No short interest data found for \(symbol) from any endpoint")
         return nil
     }
     
@@ -112,6 +181,8 @@ class FINRAClient {
             throw FINRAError.invalidURL
         }
         
+        print("Fetching short interest from: \(url.absoluteString)")
+        
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -122,13 +193,24 @@ class FINRAClient {
             throw FINRAError.invalidResponse
         }
         
+        print("Short interest API response status: \(httpResponse.statusCode)")
+        
+        if let responseString = String(data: data, encoding: .utf8) {
+            print("Short interest API response: \(responseString)")
+        }
+        
         if httpResponse.statusCode == 404 {
             // No data found for this symbol
+            print("No short interest data found for symbol \(symbol)")
             return nil
         }
         
         guard httpResponse.statusCode == 200 else {
-            throw FINRAError.apiError("HTTP \(httpResponse.statusCode)")
+            if let errorString = String(data: data, encoding: .utf8) {
+                throw FINRAError.apiError("HTTP \(httpResponse.statusCode): \(errorString)")
+            } else {
+                throw FINRAError.apiError("HTTP \(httpResponse.statusCode)")
+            }
         }
         
         // Parse the response
@@ -136,31 +218,55 @@ class FINRAClient {
     }
     
     private func parseConsolidatedShortInterest(from data: Data, symbol: String) throws -> ShortInterestData? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        // First try to parse as raw JSON
+        do {
+            let json = try JSONSerialization.jsonObject(with: data, options: [])
+            print("Parsed JSON structure: \(type(of: json))")
+            
+            // Check if it's an error response
+            if let dict = json as? [String: Any] {
+                if let error = dict["error"] as? String {
+                    print("API returned error: \(error)")
+                    throw FINRAError.apiError(error)
+                }
+                if let message = dict["message"] as? String {
+                    print("API returned message: \(message)")
+                    throw FINRAError.apiError(message)
+                }
+            }
+            
+            // Try different possible response structures
+            let records: [[String: Any]]
+            if let dataArray = (json as? [String: Any])?["data"] as? [[String: Any]] {
+                records = dataArray
+            } else if let recordsArray = (json as? [String: Any])?["records"] as? [[String: Any]] {
+                records = recordsArray
+            } else if let array = json as? [[String: Any]] {
+                records = array
+            } else if let singleRecord = json as? [String: Any], singleRecord["symbol"] != nil {
+                records = [singleRecord]
+            } else {
+                print("Unexpected JSON structure, cannot find records")
+                return nil
+            }
+            
+            print("Found \(records.count) records")
+            
+            // Find the record for our symbol
+            guard let record = records.first(where: {
+                ($0["symbol"] as? String)?.uppercased() == symbol.uppercased()
+            }) else {
+                print("No record found for symbol \(symbol)")
+                return nil
+            }
+            
+            // Parse the record
+            return parseShortInterestRecord(record)
+            
+        } catch {
+            print("JSON parsing error: \(error)")
             throw FINRAError.invalidData
         }
-        
-        // The API might return data in a "data" or "records" field
-        let records: [[String: Any]]
-        if let dataArray = json["data"] as? [[String: Any]] {
-            records = dataArray
-        } else if let recordsArray = json["records"] as? [[String: Any]] {
-            records = recordsArray
-        } else if let singleRecord = json as? [String: Any], singleRecord["symbol"] != nil {
-            records = [singleRecord]
-        } else {
-            return nil
-        }
-        
-        // Find the record for our symbol
-        guard let record = records.first(where: {
-            ($0["symbol"] as? String)?.uppercased() == symbol.uppercased()
-        }) else {
-            return nil
-        }
-        
-        // Parse the record
-        return parseShortInterestRecord(record)
     }
     
     private func parseShortInterestRecord(_ record: [String: Any]) -> ShortInterestData? {
@@ -344,38 +450,79 @@ class FINRAClient {
         
         return nil
     }
-}
-
-// MARK: - Error Types
-
-enum FINRAError: LocalizedError {
-    case invalidURL
-    case invalidCredentials
-    case authenticationFailed
-    case fileNotFound
-    case invalidData
-    case symbolNotFound
-    case apiError(String)
-    case invalidResponse
+    // MARK: - Test Method for Debugging
     
-    var errorDescription: String? {
-        switch self {
-        case .invalidURL:
-            return "Invalid FINRA API URL"
-        case .invalidCredentials:
-            return "Invalid FINRA API credentials"
-        case .authenticationFailed:
-            return "Failed to authenticate with FINRA API"
-        case .fileNotFound:
-            return "FINRA data file not found"
-        case .invalidData:
-            return "Unable to parse FINRA data"
-        case .symbolNotFound:
-            return "Symbol not found in FINRA data"
-        case .apiError(let message):
-            return "FINRA API Error: \(message)"
-        case .invalidResponse:
-            return "Invalid response from FINRA API"
+    func testConnection(clientID: String, clientSecret: String) async {
+        print("=== FINRA API Connection Test ===")
+        print("Testing with Client ID: \(String(clientID.prefix(4)))...")
+        
+        do {
+            // Test 1: Try to get access token
+            print("\n1. Testing OAuth authentication...")
+            let token = try await getAccessToken(clientID: clientID, clientSecret: clientSecret)
+            print("✓ Successfully obtained access token")
+            print("Token (first 20 chars): \(String(token.prefix(20)))...")
+            
+            // Test 2: Try to access the API
+            print("\n2. Testing API access...")
+            let testURL = URL(string: "\(apiBaseURL)/data/group/otcmarket/name/consolidatedShortInterestMock")!
+            var request = URLRequest(url: testURL)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            
+            let (data, response) = try await session.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                print("API Response Status: \(httpResponse.statusCode)")
+                if let responseString = String(data: data, encoding: .utf8) {
+                    print("API Response (first 200 chars): \(String(responseString.prefix(200)))...")
+                }
+                
+                if httpResponse.statusCode == 200 {
+                    print("✓ API access successful")
+                } else {
+                    print("✗ API returned status \(httpResponse.statusCode)")
+                }
+            }
+            
+        } catch {
+            print("✗ Test failed: \(error)")
+        }
+        
+        print("\n=== End of Connection Test ===")
+    }
+    
+    // MARK: - Error Types
+    
+    enum FINRAError: LocalizedError {
+        case invalidURL
+        case invalidCredentials
+        case authenticationFailed
+        case fileNotFound
+        case invalidData
+        case symbolNotFound
+        case apiError(String)
+        case invalidResponse
+        
+        var errorDescription: String? {
+            switch self {
+            case .invalidURL:
+                return "Invalid FINRA API URL"
+            case .invalidCredentials:
+                return "Invalid FINRA API credentials"
+            case .authenticationFailed:
+                return "Failed to authenticate with FINRA API"
+            case .fileNotFound:
+                return "FINRA data file not found"
+            case .invalidData:
+                return "Unable to parse FINRA data"
+            case .symbolNotFound:
+                return "Symbol not found in FINRA data"
+            case .apiError(let message):
+                return "FINRA API Error: \(message)"
+            case .invalidResponse:
+                return "Invalid response from FINRA API"
+            }
         }
     }
 }
