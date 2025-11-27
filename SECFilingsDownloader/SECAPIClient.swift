@@ -101,9 +101,9 @@ class SECAPIClient: ObservableObject {
         for i in 0..<recent.form.count {
             let form = recent.form[i]
             let filingDateStr = recent.filingDate[i]
-            
+
             // Check if form type matches any of the selected types
-            let matchesFormType = formTypes.contains { formType in
+            let matchesFormType = formTypes.isEmpty || formTypes.contains { formType in
                 form.uppercased().contains(formType.uppercased())
             }
             

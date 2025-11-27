@@ -39,9 +39,15 @@ class DownloaderViewModel: ObservableObject {
         downloadFolder != nil &&
         !isDownloading
     }
-    
+
+    var canStartDownloadAll: Bool {
+        !ticker.isEmpty &&
+        downloadFolder != nil &&
+        !isDownloading
+    }
+
     func addFilingType(_ type: FilingType) {
-        if selectedFilingTypes.count < 4 && !selectedFilingTypes.contains(where: { $0.name == type.name }) {
+        if !selectedFilingTypes.contains(where: { $0.name == type.name }) {
             selectedFilingTypes.append(type)
         }
     }
@@ -65,21 +71,27 @@ class DownloaderViewModel: ObservableObject {
     
     func startDownload() {
         guard canStartDownload else { return }
-        
+
         Task {
-            await performDownload()
+            await performDownload(formTypes: selectedFilingTypes.map { $0.name })
         }
     }
-    
-    private func performDownload() async {
+
+    func startDownloadAll() {
+        guard canStartDownloadAll else { return }
+
+        Task {
+            await performDownload(formTypes: [])
+        }
+    }
+
+    private func performDownload(formTypes: [String]) async {
         isDownloading = true
         downloadProgress = 0
         statusMessage = "Starting download..."
         lastDownloadResult = nil
         
         do {
-            let formTypes = selectedFilingTypes.map { $0.name }
-            
             let result = try await apiClient.downloadFilings(
                 tickerOrCIK: ticker.trimmingCharacters(in: .whitespacesAndNewlines),
                 formTypes: formTypes,
