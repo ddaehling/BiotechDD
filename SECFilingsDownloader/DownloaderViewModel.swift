@@ -86,9 +86,13 @@ class DownloaderViewModel: ObservableObject {
     }
 
     private func performDownload(formTypes: [String]) async {
+        let isDownloadAll = formTypes.isEmpty
+
         isDownloading = true
         downloadProgress = 0
-        statusMessage = "Starting download..."
+        statusMessage = isDownloadAll
+            ? "Starting download for all filings..."
+            : "Starting download..."
         lastDownloadResult = nil
         
         do {
@@ -121,9 +125,13 @@ class DownloaderViewModel: ObservableObject {
             lastDownloadResult = result
             
             if result.total == 0 {
-                statusMessage = "No filings found matching your criteria"
+                statusMessage = isDownloadAll
+                    ? "No filings found for the selected company and dates"
+                    : "No filings found matching your criteria"
             } else {
-                statusMessage = "Successfully downloaded \(result.successful) of \(result.total) filings"
+                statusMessage = isDownloadAll
+                    ? "Successfully downloaded \(result.successful) of \(result.total) available filings"
+                    : "Successfully downloaded \(result.successful) of \(result.total) filings"
             }
             
             // Open the download folder in Finder
