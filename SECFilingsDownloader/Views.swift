@@ -53,11 +53,11 @@ struct FilingTypeSelectorView: View {
                         FilingTypeRow(
                             type: type,
                             isSelected: selectedTypes.contains(where: { $0.name == type.name }),
-                            isDisabled: selectedTypes.count >= 4 && !selectedTypes.contains(where: { $0.name == type.name })
+                            isDisabled: false
                         ) {
                             if selectedTypes.contains(where: { $0.name == type.name }) {
                                 selectedTypes.removeAll { $0.name == type.name }
-                            } else if selectedTypes.count < 4 {
+                            } else {
                                 selectedTypes.append(type)
                             }
                         }
@@ -67,10 +67,10 @@ struct FilingTypeSelectorView: View {
             }
             
             Divider()
-            
+
             // Footer
             HStack {
-                Text("\(selectedTypes.count) of 4 selected")
+                Text("\(selectedTypes.count) selected")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()

@@ -39,9 +39,15 @@ class DownloaderViewModel: ObservableObject {
         downloadFolder != nil &&
         !isDownloading
     }
-    
+
+    var canStartDownloadAll: Bool {
+        !ticker.isEmpty &&
+        downloadFolder != nil &&
+        !isDownloading
+    }
+
     func addFilingType(_ type: FilingType) {
-        if selectedFilingTypes.count < 4 && !selectedFilingTypes.contains(where: { $0.name == type.name }) {
+        if !selectedFilingTypes.contains(where: { $0.name == type.name }) {
             selectedFilingTypes.append(type)
         }
     }
@@ -65,21 +71,31 @@ class DownloaderViewModel: ObservableObject {
     
     func startDownload() {
         guard canStartDownload else { return }
-        
+
         Task {
-            await performDownload()
+            await performDownload(formTypes: selectedFilingTypes.map { $0.name })
         }
     }
-    
-    private func performDownload() async {
+
+    func startDownloadAll() {
+        guard canStartDownloadAll else { return }
+
+        Task {
+            await performDownload(formTypes: [])
+        }
+    }
+
+    private func performDownload(formTypes: [String]) async {
+        let isDownloadAll = formTypes.isEmpty
+
         isDownloading = true
         downloadProgress = 0
-        statusMessage = "Starting download..."
+        statusMessage = isDownloadAll
+            ? "Starting download for all filings..."
+            : "Starting download..."
         lastDownloadResult = nil
         
         do {
-            let formTypes = selectedFilingTypes.map { $0.name }
-            
             let result = try await apiClient.downloadFilings(
                 tickerOrCIK: ticker.trimmingCharacters(in: .whitespacesAndNewlines),
                 formTypes: formTypes,
@@ -109,9 +125,13 @@ class DownloaderViewModel: ObservableObject {
             lastDownloadResult = result
             
             if result.total == 0 {
-                statusMessage = "No filings found matching your criteria"
+                statusMessage = isDownloadAll
+                    ? "No filings found for the selected company and dates"
+                    : "No filings found matching your criteria"
             } else {
-                statusMessage = "Successfully downloaded \(result.successful) of \(result.total) filings"
+                statusMessage = isDownloadAll
+                    ? "Successfully downloaded \(result.successful) of \(result.total) available filings"
+                    : "Successfully downloaded \(result.successful) of \(result.total) filings"
             }
             
             // Open the download folder in Finder

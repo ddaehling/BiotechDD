@@ -124,7 +124,7 @@ struct FilingsDownloaderView: View {
                             .imageScale(.large)
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.selectedFilingTypes.count >= 4 || viewModel.isDownloading)
+                    .disabled(viewModel.isDownloading)
                 }
             }
         }
@@ -273,14 +273,19 @@ struct FooterView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
+
+            Button("Download All Filings") {
+                viewModel.startDownloadAll()
+            }
+            .disabled(!viewModel.canStartDownloadAll)
+
             Button("Reset") {
                 viewModel.reset()
             }
             .disabled(viewModel.isDownloading)
-            
+
             Button("Download Filings") {
                 viewModel.startDownload()
             }
